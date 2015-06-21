@@ -1,0 +1,190 @@
+---
+title: "PML"
+author: "Christopher Mooney"
+date: "06/18/2015"
+output: html_document
+---
+
+## Summary
+This analysis was created from measuring invidivuals performing weight lifting excercises. They performed these correctly and incorrecltly. This has become possible from such devices as Jawbone, Nike Fuel Band and Fitbit. One could classify these as the internet of things. It is a very exciting analysis because we now have more data than ever before and this is a perfect example how data can help improve peoples lifes from predictive modeling.
+
+
+## Load packages
+```{r}
+suppressMessages(library(caret))
+suppressMessages(library(randomForest))
+suppressMessages(library(rpart))
+suppressMessages(library(sqldf))
+suppressMessages(library(ggplot2))
+```
+
+## Load Data
+
+```{r}
+FilePath = '/home/christopher/Downloads/'
+TrainingFile= 'pml-training.csv'
+TrainingFile = paste(FilePath,TrainingFile,sep='')
+
+TestingFile = 'pml-testing.csv'
+TestingFile = paste(FilePath,TestingFile,sep='')
+
+PML = read.csv(TrainingFile,header=T)
+PMLPostTest = read.csv(TestingFile,header=T)
+#DropID
+PML$X = NULL
+```
+
+
+## Data Cleaning 
+There are many columns that are sparse so we will remove this values. Primarily this stage is done solely on train then applied to test. However, we are not performing any variable transformation so we do not need to do this seperately on test and train. 
+```{r,  message=FALSE, warning=FALSE}
+list = c()
+for(i in 1:length(colnames(PML))){
+  
+  # Agg data
+  Cases = table(PML[colnames(PML)[i]])
+  Cases = sort(Cases,decreasing=T)
+  
+  # Drop Variables that are > 95% missing
+  if(sum(is.na(PML[colnames(PML)[i]]))/nrow(PML) >.95)
+  {
+    list = c(list , c=colnames(PML)[i])
+  }
+  # Drop variables that are close to static (Warning becareful sometimes that minroity help explain variance)  
+  else if(Cases[1]/nrow(PML)>.95)
+  {
+    list = c(list , c=colnames(PML)[i])     
+  }
+}
+```
+##  Drop variables that are missing more than 95% or static columns
+
+```{r,  message=FALSE, warning=FALSE}
+print('The following variables will be dropped')
+print(as.data.frame(list))
+PML = PML[, !(colnames(PML) %in% c((list)))]
+```
+
+## Data Partitioning
+```{r, message=FALSE, warning=FALSE}
+trainIndex <- createDataPartition(PML$classe, p = .6,
+                                  list = FALSE,
+                                  times = 1)
+
+PMLTrain <- PML[ trainIndex,]
+PMLTest  <- PML[-trainIndex,]
+```
+
+## Modeling
+```{r, message=FALSE, warning=FALSE}
+myControl <- trainControl(method='repeatedcv', number=5, returnResamp='none')
+gbmGrid <-  expand.grid(interaction.depth = c(1, 5, 9),
+                        n.trees = (1:30)*50,
+                        shrinkage = 0.1)
+
+# The models we try are: RandomForest, GBM, NN, LogitBoost
+predictors <- names(PMLTrain)[names(PMLTrain) != 'classe']
+PMLTrain <- PMLTrain[,colSums(is.na(PMLTrain))<nrow(PMLTrain)]
+
+system.time(model_rpart <- train(PMLTrain[,predictors], PMLTrain[,'classe'], method='rpart', trControl=myControl))
+system.time(model_rf <- train(PMLTrain[,predictors], PMLTrain[,'classe'], method='rf', trControl=myControl))
+system.time(model_nb <- train(PMLTrain[,predictors], PMLTrain[,'classe'], method='nb', trControl=myControl))
+
+# Model Results
+pred_rpart = predict(model_rpart, PMLTest[,predictors])
+pred_rf = predict(model_rf, PMLTest[,predictors])
+pred_NB = predict(model_nb, PMLTest[,predictors])
+```
+
+## Model Results
+```{r, message=FALSE, warning=FALSE}
+print('Tree Model')
+xtab <- table(pred_rpart, PMLTest$classe)
+confusionMatrix(xtab)
+print('RF Model')
+xtab <- table(pred_rf, PMLTest$classe)
+confusionMatrix(xtab)
+print('NB Model')
+xtab <- table(pred_NB, PMLTest$classe)
+confusionMatrix(xtab)
+```
+## Model Results analysis
+We can see that the individual tree did not perform well because it completed missed two classes and it was essentially guessing at random.
+The randomforest and NB both performed very well.
+
+
+## Variable Selection
+
+```{r, message=FALSE, warning=FALSE}
+
+dat = varImp(model_rf, type=2)
+featureImportance <- data.frame(dat[1])
+featureImportance$Var = rownames(featureImportance)
+rownames(featureImportance) <- 1:nrow(featureImportance)
+
+featureImportance$Var = as.character(featureImportance$Var)
+
+## Var Plot
+featureImportance = sqldf("select * from featureImportance order by Overall desc limit 20")
+ggplot(featureImportance, aes(x=reorder(Var, order(Overall, decreasing = F)), y=Overall)) +
+  geom_bar(stat="identity", fill="#E8AFAF") +
+  coord_flip() + 
+  theme_light(base_size=20) +
+  xlab("Variable") +
+  ylab("Importance") + 
+  ggtitle("Random Forest Feature Importance") +
+  theme(plot.title=element_text(size=18))
+
+featureImportance = sqldf("select Var from featureImportance order by Overall desc limit 20")
+
+RfSelectedVariables = c()
+for(x in 1:nrow(featureImportance)){
+  RfSelectedVariables = c(RfSelectedVariables , c=featureImportance[[1]][x])     
+}
+```
+## Variable Selected Features
+RandomForest variable selection method was used opposed to a simple stepwise selection because stepwise will underperfom because many of the variables are non linear to the outcome which can cause issues. RandomForest works very well because it builds models with holding out one variable each time with replacement and it works all of mean decrease in accuracy. Essentially this mean how much does model performance decrease with a given variable held out. One can think of it this way: If we are modeling HomeSales Price. SQ Footage would probably be a good indicator on sales price and without the variable we would see a big decrease in model accuracy. Now, if we held out the binary attribute of Deck, we would most likely not see a huge decrease in model accruacy. 
+
+
+## Post Variable Selection Modeling
+```{r, message=FALSE, warning=FALSE}
+
+system.time(model_rpart <- train(PMLTrain[,RfSelectedVariables], PMLTrain[,'classe'], method='rpart', trControl=myControl))
+system.time(model_rf <- train(PMLTrain[,RfSelectedVariables], PMLTrain[,'classe'], method='rf', trControl=myControl))
+system.time(model_nb <- train(PMLTrain[,RfSelectedVariables], PMLTrain[,'classe'], method='nb', trControl=myControl))
+
+# Model Selection
+pred_rpart = predict(model_rpart, PMLTest[,RfSelectedVariables])
+pred_rf = predict(model_rf, PMLTest[,RfSelectedVariables])
+pred_NB = predict(model_nb, PMLTest[,RfSelectedVariables])
+
+```
+## Post Time Performance
+Now that we are  only using variables that directly influence our outcome we can see that our training time has essentially been cut in half. 
+
+
+## Post Variable Selection Modeling Results
+```{r, message=FALSE, warning=FALSE}
+
+print('Tree Model')
+xtab <- table(pred_rpart, PMLTest$classe)
+confusionMatrix(xtab)
+print('RF Model')
+xtab <- table(pred_rf, PMLTest$classe)
+confusionMatrix(xtab)
+print('NB Model')
+xtab <- table(pred_NB, PMLTest$classe)
+confusionMatrix(xtab)
+
+```
+
+## Results
+A good rule of thumb is to always go with a simpler model. Based upon the variable selection RandomForest outperformed a single tree and the probablist model. However, I would still select the RandomForest because this model is not affecting an organizations bottom line or predicting a medical type treatment. 
+
+
+## Citation
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6. 
+Cited by 2 (Google Scholar)
+
+
+
